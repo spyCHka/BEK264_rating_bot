@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+bot-token.txt
+data/
+transfer/
+*.sqlite*
+*.db
+*.db-*
+*.zip
+*.pyz
+.DS_Store

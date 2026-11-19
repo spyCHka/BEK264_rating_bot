@@ -1,0 +1,40 @@
+name: Обновить бота
+on:
+  push:
+    branches: [main]
+    paths:
+      - '*.py'
+      - 'scripts/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: altare-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Собрать и проверить бота
+        run: |
+          python3 scripts/package_bot.py "$RUNNER_TEMP/bot.pyz"
+          python3 scripts/check_bundle.py "$RUNNER_TEMP/bot.pyz"
+      - name: Обновить бота на Altare
+        env:
+          ALTARE_TOKEN: ${{ secrets.ALTARE_TOKEN }}
+        run: |
+          if [[ -z "$ALTARE_TOKEN" ]]; then
+            echo "::error::Добавь ALTARE_TOKEN в Settings → Secrets and variables → Actions, затем повтори запуск."
+            exit 1
+          fi
+          bash scripts/deploy.sh "$RUNNER_TEMP/bot.pyz"
