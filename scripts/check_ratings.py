@@ -77,7 +77,8 @@ class RatingChecks(unittest.TestCase):
         for grade in (1, 5):
             entry = self.send(31, f"vote:{target}:2026-11-19:{grade}")
             self.assertFalse(any(b["callback_data"].startswith("vote:") for b in self.buttons(entry)))
-            self.assertIn("Твоя оценка сегодня: 1", entry["text"])
+            self.assertIn("Твоя сегодняшняя оценка @user10 — 1 из 5. "
+                          "Следующая возможность поставить новую оценку @user10 — с 00:00 МСК.", entry["text"])
         self.assertEqual(announcements(), count)
         self.send(32, f"vote:{target}:2026-11-19:5")
         self.send(31, f"vote:{other}:2026-11-19:4")

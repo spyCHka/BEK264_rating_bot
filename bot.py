@@ -625,13 +625,15 @@ class Screen:
 
     def card(self, student, note=""):
         sid = student["id"]
-        text = f"<b>{escape(display_name(student))}</b>\n{summary(student)}"
+        name = escape(display_name(student))
+        text = f"<b>{name}</b>\n{summary(student)}"
         rows = []
         if student["telegram"] != self.chat:
             today = student["today"]
             mine = self.own_vote(sid, today)
             if mine:
-                text += f"\nТвоя оценка сегодня: {mine['grade']} из 5. Следующая — с 00:00 МСК."
+                text += (f"\nТвоя сегодняшняя оценка {name} — {mine['grade']} из 5. "
+                         f"Следующая возможность поставить новую оценку {name} — с 00:00 МСК.")
                 rows.append([("↻ Обновить карточку", f"card:{sid}")])
             else:
                 text += "\nТвоя оценка за сегодня:"
