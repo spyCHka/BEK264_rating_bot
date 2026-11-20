@@ -9,32 +9,34 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: altare-production
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  publish:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: main
           persist-credentials: false
       - name: Собрать и проверить бота
         run: |
+          python3 -m py_compile scripts/auto_update.py
           python3 scripts/package_bot.py "$RUNNER_TEMP/bot.pyz"
           python3 scripts/check_bundle.py "$RUNNER_TEMP/bot.pyz"
-      - name: Обновить бота на Altare
+      - name: Опубликовать проверенную сборку
         env:
-          ALTARE_TOKEN: ${{ secrets.ALTARE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ -z "$ALTARE_TOKEN" ]]; then
-            echo "::error::Добавь ALTARE_TOKEN в Settings → Secrets and variables → Actions, затем повтори запуск."
-            exit 1
-          fi
-          bash scripts/deploy.sh "$RUNNER_TEMP/bot.pyz"
+          tag="bot-$GITHUB_RUN_NUMBER-$GITHUB_RUN_ATTEMPT"
+          sha=$(git rev-parse HEAD)
+          digest=$(sha256sum "$RUNNER_TEMP/bot.pyz" | cut -d ' ' -f 1)
+          printf '%s %s\n' "$tag" "$digest" > "$RUNNER_TEMP/version.txt"
+          gh release create "$tag" "$RUNNER_TEMP/bot.pyz" "$RUNNER_TEMP/version.txt" scripts/auto_update.py \
+            --target "$sha" --latest --title "Бот · ${sha:0:7}" --notes "Сборка коммита $sha."
