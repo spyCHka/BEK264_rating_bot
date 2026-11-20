@@ -77,8 +77,10 @@ class RatingChecks(unittest.TestCase):
         for grade in (1, 5):
             entry = self.send(31, f"vote:{target}:2026-11-19:{grade}")
             self.assertFalse(any(b["callback_data"].startswith("vote:") for b in self.buttons(entry)))
-            self.assertIn("Твоя сегодняшняя оценка @user10 — 1 из 5. "
-                          "Следующая возможность поставить новую оценку @user10 — с 00:00 МСК.", entry["text"])
+            self.assertEqual(entry["text"].splitlines()[-2:], [
+                "Твоя сегодняшняя оценка пользователю @user10 - 1 из 5.",
+                "Следующая возможность поставить новую оценку @user10 будет доступна с 00:00 МСК.",
+            ])
         self.assertEqual(announcements(), count)
         self.send(32, f"vote:{target}:2026-11-19:5")
         self.send(31, f"vote:{other}:2026-11-19:4")
@@ -125,7 +127,7 @@ class RatingChecks(unittest.TestCase):
         self.send(33, edit)  # no vote of their own to edit
         self.send(10, edit)  # recipient cannot vote for themself
         changed = self.send(31, edit)
-        self.assertIn("Твоя сегодняшняя оценка @user10 — 5 из 5", changed["text"])
+        self.assertIn("Твоя сегодняшняя оценка пользователю @user10 - 5 из 5.", changed["text"])
         self.assertEqual((self.stats(target)["today_n"], self.stats(target)["today_mean"]), (2, 4))
         self.assertEqual((self.stats(target)["n"], self.stats(target)["mean"]), (2, 4))
         self.assertIn("Оценка исправлена", notices()[-1])

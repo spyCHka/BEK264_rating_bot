@@ -632,9 +632,8 @@ class Screen:
             today = student["today"]
             mine = self.own_vote(sid, today)
             if mine:
-                text += (f"\nТвоя сегодняшняя оценка {name} — {mine['grade']} из 5. "
-                         f"Следующая возможность поставить новую оценку {name} — с 00:00 МСК.\n"
-                         "Чтобы исправить сегодняшнюю оценку, выбери другой балл ниже.")
+                text += (f"\nТвоя сегодняшняя оценка пользователю {name} - {mine['grade']} из 5.\n"
+                         f"Следующая возможность поставить новую оценку {name} будет доступна с 00:00 МСК.")
                 rows.append([(f"✓ {i}" if i == mine["grade"] else str(i), f"revote:{sid}:{today}:{i}")
                              for i in range(1, 6)])
                 rows.append([("↻ Обновить карточку", f"card:{sid}")])
