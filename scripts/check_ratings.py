@@ -105,6 +105,47 @@ class RatingChecks(unittest.TestCase):
         self.assertEqual(history.count("@user31"), 2)
         self.assertIsNone(bot.personal_grades(self.db, 31, target, 0))
 
+    def test_correct_only_own_vote_for_current_moscow_day(self):
+        target = self.member(10, vip=True)
+        for voter in (31, 32, 33):
+            self.send(voter, "/start")
+        self.send(31, f"vote:{target}:2026-11-19:1")
+        self.send(32, f"vote:{target}:2026-11-19:3")
+
+        def button(card, label):
+            return next(b["callback_data"] for b in self.buttons(card) if b["text"] == label)
+
+        def notices():
+            return [json.loads(row[0])["text"] for row in self.db.execute(
+                "SELECT body FROM outbox WHERE chat=10 AND announcement=1 ORDER BY id")]
+
+        # A previously cast vote can be corrected by reopening the card.
+        card = self.send(31, f"card:{target}")
+        edit = button(card, "5")
+        self.send(33, edit)  # no vote of their own to edit
+        self.send(10, edit)  # recipient cannot vote for themself
+        changed = self.send(31, edit)
+        self.assertIn("Твоя сегодняшняя оценка @user10 — 5 из 5", changed["text"])
+        self.assertEqual((self.stats(target)["today_n"], self.stats(target)["today_mean"]), (2, 4))
+        self.assertEqual((self.stats(target)["n"], self.stats(target)["mean"]), (2, 4))
+        self.assertIn("Оценка исправлена", notices()[-1])
+        self.send(31, button(changed, "✓ 5"))
+        self.assertEqual(len(notices()), 3)
+
+        self.clock = "2026-11-19 21:00:00"  # midnight in Moscow
+        expired = button(changed, "2")
+        fresh = self.send(31, expired)
+        self.assertEqual(self.stats(target)["today_n"], 0)
+        current = self.send(31, button(fresh, "4"))
+        self.send(31, button(current, "1"))
+        self.send(31, expired)
+        row = self.stats(target)
+        self.assertEqual((row["n"], row["mean"], row["today_n"], row["today_mean"]), (3, 3, 1, 1))
+        history = bot.personal_grades(self.db, 10, target, 0)["text"]
+        self.assertIn("19.11.2026 · @user31 · <b>5 из 5", history)
+        self.assertIn("19.11.2026 · @user32 · <b>3 из 5", history)
+        self.assertIn("20.11.2026 · @user31 · <b>1 из 5", history)
+
     def test_ranking_across_pages_and_role_privacy(self):
         self.send(100, "/start test-claim")
         ids = {n: self.member(n, vip=n in (11, 12)) for n in range(10, 20)}

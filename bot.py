@@ -334,8 +334,8 @@ class Screen:
                       "mute" if notify else "unmute")])
         text = ("📘 <b>Оценки группы</b>\n\n" + (intro + "\n\n" if intro else "") +
                 "Выбери одногруппника и поставь балл от 1 до 5. В таблице видны "
-                "общий средний балл и средний за сегодня. Каждого можно оценить один раз в день. "
-                "Следующая оценка доступна с 00:00 по Москве.")
+                "общий средний балл и средний за сегодня. За день учитывается одна твоя оценка каждому "
+                "участнику. Её можно исправить до полуночи по Москве.")
         if self.owner:
             text += f"\n\nСсылка для группы: https://t.me/{self.journal.username}"
         status = "включены" if notify else "выключены"
@@ -564,7 +564,7 @@ class Screen:
             self.page(cmd, int(parts[1]))
         elif cmd == "add":
             self.begin_add()
-        elif cmd in ("card", "vote", "invite", "bind", "remove", "confirm", "grade", "vip", "merge", "keep") and len(parts) >= 2:
+        elif cmd in ("card", "vote", "revote", "invite", "bind", "remove", "confirm", "grade", "vip", "merge", "keep") and len(parts) >= 2:
             self.student_action(cmd, parts)
         else:
             self.home()
@@ -633,7 +633,10 @@ class Screen:
             mine = self.own_vote(sid, today)
             if mine:
                 text += (f"\nТвоя сегодняшняя оценка {name} — {mine['grade']} из 5. "
-                         f"Следующая возможность поставить новую оценку {name} — с 00:00 МСК.")
+                         f"Следующая возможность поставить новую оценку {name} — с 00:00 МСК.\n"
+                         "Чтобы исправить сегодняшнюю оценку, выбери другой балл ниже.")
+                rows.append([(f"✓ {i}" if i == mine["grade"] else str(i), f"revote:{sid}:{today}:{i}")
+                             for i in range(1, 6)])
                 rows.append([("↻ Обновить карточку", f"card:{sid}")])
             else:
                 text += "\nТвоя оценка за сегодня:"
@@ -668,8 +671,8 @@ class Screen:
             self.show("Этой записи уже нет в таблице.", [[("К списку", "pick:0")], BACK])
             return
         sid = student["id"]
-        if cmd == "vote" and len(parts) == 4 and parts[3] in ("1", "2", "3", "4", "5"):
-            self.vote(student, parts[2], int(parts[3]))
+        if cmd in ("vote", "revote") and len(parts) == 4 and parts[3] in ("1", "2", "3", "4", "5"):
+            self.vote(student, parts[2], int(parts[3]), editing=(cmd == "revote"))
         elif cmd in ("vip", "remove", "confirm", "invite", "bind", "merge", "keep") and not self.is_vip:
             self.vip_required()
         elif cmd in ("vip", "remove", "confirm") and self.is_owner_card(student):
@@ -725,7 +728,7 @@ class Screen:
             # Old single-owner keyboards open the current card on upgrade.
             self.card(student)
 
-    def vote(self, student, day, grade):
+    def vote(self, student, day, grade, *, editing):
         sid = student["id"]
         if student["telegram"] == self.chat:
             self.show("Это твой профиль. Выбери другого участника.", [[("К списку", "pick:0")], BACK])
@@ -733,17 +736,25 @@ class Screen:
         if day != student["today"]:
             self.card(student, "Карточка обновлена на сегодня.")
             return
-        inserted = self.db.execute("""INSERT INTO votes(student,voter,day,grade,changed)
-            VALUES (?,?,?,?,?) ON CONFLICT(student,voter,day) DO NOTHING""",
-            (sid, self.chat, day, grade, time.time_ns())).rowcount
-        if not inserted:
-            self.card(student, "Сегодня ты уже оценил этого участника.")
+        if editing:
+            # Keep the original vote timestamp used to merge duplicate profiles.
+            changed = self.db.execute("""UPDATE votes SET grade=?
+                WHERE student=? AND voter=? AND day=? AND day=date('now','+3 hours') AND grade!=?""",
+                (grade, sid, self.chat, day, grade)).rowcount
+        else:
+            changed = self.db.execute("""INSERT INTO votes(student,voter,day,grade,changed)
+                SELECT ?,?,?,?,? WHERE ?=date('now','+3 hours')
+                ON CONFLICT(student,voter,day) DO NOTHING""",
+                (sid, self.chat, day, grade, time.time_ns(), day)).rowcount
+        if not changed:
+            self.card(self.db.execute("SELECT * FROM standings WHERE id=?", (sid,)).fetchone())
             return
         self.db.execute("UPDATE students SET revision=revision+1 WHERE id=?", (sid,))
         updated = self.db.execute("SELECT * FROM standings WHERE id=?", (sid,)).fetchone()
-        text = (f"📘 <b>Новая оценка</b>\n\n{escape(display_name(updated))}  ·  {grade} из 5\n"
+        title = "Оценка исправлена" if editing else "Новая оценка"
+        text = (f"📘 <b>{title}</b>\n\n{escape(display_name(updated))}  ·  {grade} из 5\n"
                 f"Теперь в таблице: {summary(updated)}")
-        self.card(updated, "✓ Твоя оценка учтена.")
+        self.card(updated, "✓ Твоя оценка исправлена." if editing else "✓ Твоя оценка учтена.")
         self.db.execute("""INSERT INTO outbox(chat,method,body,announcement,grade_student)
             SELECT chat,'sendMessage',?,1,? FROM grade_subscribers
             WHERE student=? OR vip=1""", (json.dumps({"text": text}, ensure_ascii=False), sid, sid))
