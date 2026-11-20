@@ -4,11 +4,36 @@ set -euo pipefail
 bundle=$1
 api=https://console.altare.gg/api
 auth="Authorization: Bearer ${ALTARE_TOKEN:?}"
-api_get() { curl --silent --show-error --fail --max-time 45 -H "$auth" "$@"; }
+api_get() {
+  local url="${!#}" endpoint body code
+  endpoint=${url##*/servers/*/}
+  if [[ "$endpoint" == "$url" ]]; then endpoint=${url#"$api/"}; fi
+  printf 'Altare API: %s\n' "$endpoint" >&2
+  if body=$(curl --silent --show-error --fail-with-body --max-time 45 -H "$auth" "$@"); then
+    printf '%s' "$body"
+  else
+    # API responses may include private files or signed URLs. Log only error codes.
+    code=$(jq -er '.code | strings | select(test("^[A-Z][A-Z_]{1,48}$"))' <<<"$body" 2>/dev/null) || code=""
+    if [[ -n "$code" ]]; then
+      echo "Altare error: $code" >&2
+    elif [[ "${body,,}" == *"<html"* ]]; then
+      echo "Altare returned an HTML error page." >&2
+    fi
+    return 1
+  fi
+}
 api_post() { api_get -H 'Content-Type: application/json' --data-binary "$2" "$1"; }
 
 # The operator selects exactly one server when creating the token.
 identity=$(api_get "$api/api-tokens/self")
+if jq -e '.scopes | type == "array"' <<<"$identity" >/dev/null; then
+  for scope in servers:files servers:power; do
+    jq -e --arg scope "$scope" '.scopes | index($scope) != null' <<<"$identity" >/dev/null || {
+      echo "Altare: отсутствует право $scope." >&2
+      exit 1
+    }
+  done
+fi
 team=$(jq -er '.team.id | select(type=="string" and test("^[a-zA-Z0-9_-]+$"))' <<<"$identity")
 server=$(jq -er '.serverIds | select(type=="array" and length==1) | .[0] | select(type=="string" and test("^[a-zA-Z0-9_-]+$"))' <<<"$identity") || {
   echo "В Altare выбери Only some apps и укажи один сервер бота." >&2
@@ -36,10 +61,12 @@ exists=$(api_get --get --data-urlencode 'path=/' "$base/files" |
   jq -r --arg name "$release" 'any(.items[]; .name == $name and .isFile)')
 if [[ "$exists" != true ]]; then
   upload=$(api_post "$base/files/uploads/url" '{"directory":"/"}' | jq -er '.url')
+  echo "Загружаю сборку по выданной Altare ссылке." >&2
   curl --proto '=https' --silent --show-error --fail --max-time 90 -o /dev/null \
     -F "files=@$bundle;filename=$release" "$upload"
 fi
 download=$(api_get --get --data-urlencode "path=/$release" "$base/files/download" | jq -er '.url')
+echo "Проверяю загруженную сборку." >&2
 curl --proto '=https' --proto-redir '=https' --location --silent --show-error --fail --max-time 90 \
   -o "$tmpdir/received.pyz" "$download"
 cmp --silent "$bundle" "$tmpdir/received.pyz" || { echo "Файл на сервере отличается от сборки." >&2; exit 1; }
