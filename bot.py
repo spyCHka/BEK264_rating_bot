@@ -11,9 +11,8 @@ PAGE_SIZE = 8
 TABLE = "📋 Таблица оценок"
 BACK = [("Главное меню", "home")]
 ADD = [("＋ Добавить одногруппника", "add")]
-VIP = "💎 VIP"
-MANAGE = [("💎 Участники и VIP", "viplist:0")]
-MY_GRADES = [("💎 Кто меня оценил", "received:0")]
+MANAGE = [("Управление участниками", "viplist:0")]
+MY_GRADES = [("Кто меня оценил", "received:0")]
 
 
 def connect(path):
@@ -123,6 +122,33 @@ def connect(path):
                 LEFT JOIN students s ON s.id=a.student
                 WHERE v.notify=1 AND v.reachable=1""")
             set_value(db, "targeted_notifications", "1")
+        if not setting(db, "daily_votes"):
+            db.execute("ALTER TABLE students ADD COLUMN listed INTEGER NOT NULL DEFAULT 1")
+            db.execute("DROP VIEW standings")
+            db.execute("""CREATE TABLE daily_votes (
+                student INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+                voter INTEGER NOT NULL, day TEXT NOT NULL,
+                grade INTEGER NOT NULL CHECK(grade BETWEEN 1 AND 5), changed INTEGER NOT NULL,
+                PRIMARY KEY(student,voter,day))""")
+            # changed=1 is the old import marker, not a real vote timestamp.
+            db.execute("""INSERT INTO daily_votes(student,voter,day,grade,changed)
+                SELECT student,voter,CASE WHEN changed=1 THEN ''
+                    ELSE date(changed/1000000000,'unixepoch','+3 hours') END,grade,changed
+                FROM votes""")
+            db.execute("DROP TABLE votes")
+            db.execute("ALTER TABLE daily_votes RENAME TO votes")
+            db.execute("""CREATE VIEW standings AS
+                WITH clock(today) AS (SELECT date('now','+3 hours'))
+                SELECT s.id,s.name,s.normalized,s.added_by,s.vip,a.telegram,i.username,s.revision,
+                    clock.today,COUNT(v.grade) AS n,AVG(v.grade) AS mean,
+                    AVG(CASE WHEN v.day=clock.today THEN v.grade END) AS today_mean,
+                    COUNT(CASE WHEN v.day=clock.today THEN v.grade END) AS today_n
+                FROM students s CROSS JOIN clock LEFT JOIN accounts a ON a.student=s.id
+                LEFT JOIN identities i ON i.telegram=a.telegram LEFT JOIN votes v ON v.student=s.id
+                WHERE s.listed=1 GROUP BY s.id""")
+            # Older messages still waiting for Telegram may contain the old public badge.
+            db.execute("UPDATE outbox SET body=replace(body, ' · 💎 VIP', '') WHERE instr(body, ' · 💎 VIP')>0")
+            set_value(db, "daily_votes", "1")
     return db
 
 
@@ -174,7 +200,7 @@ def personal_grades(db, chat, student, page):
         return None
     pages = max(1, (roster["n"] + PAGE_SIZE - 1) // PAGE_SIZE)
     page = min(max(page, 0), pages - 1)
-    votes = db.execute("""SELECT v.voter,v.grade,i.username,COALESCE(i.full_name,s.name) AS full_name
+    votes = db.execute("""SELECT v.voter,v.grade,v.day,i.username,COALESCE(i.full_name,s.name) AS full_name
         FROM votes v LEFT JOIN identities i ON i.telegram=v.voter
         LEFT JOIN accounts a ON a.telegram=v.voter LEFT JOIN students s ON s.id=a.student
         WHERE v.student=? ORDER BY v.changed DESC,v.voter LIMIT ? OFFSET ?""",
@@ -183,7 +209,7 @@ def personal_grades(db, chat, student, page):
     if not votes:
         text += "\n\nТебе пока не поставили ни одной оценки."
     else:
-        text += "\nПоследняя оценка каждого участника"
+        text += "\nВсе полученные оценки по датам (МСК)"
     for vote in votes:
         if vote["username"]:
             author = "@" + escape(vote["username"])
@@ -192,7 +218,8 @@ def personal_grades(db, chat, student, page):
             author = f'<a href="tg://user?id={vote["voter"]}">{name}</a>'
         else:
             author = "Автор прежней оценки неизвестен"
-        text += f"\n\n{author}  ·  <b>{vote['grade']} из 5</b>"
+        date_label = ".".join(reversed(vote["day"].split("-"))) if vote["day"] else "Дата неизвестна"
+        text += f"\n\n{date_label} · {author} · <b>{vote['grade']} из 5</b>"
     rows = []
     if pages > 1:
         text += f"\n\nСтраница {page+1} из {pages}"
@@ -261,7 +288,7 @@ class Screen:
 
     def vip_required(self):
         self.close_picker()
-        self.home("Управлять участниками и выдавать VIP могут участники со статусом 💎 VIP.")
+        self.home("Управлять участниками и выдавать VIP могут участники со статусом VIP.")
 
     def show(self, text, rows, role_menu=False):
         body = payload(text, rows)
@@ -288,8 +315,10 @@ class Screen:
     def viewer(self):
         return self.db.execute("SELECT * FROM viewers WHERE id=?", (self.chat,)).fetchone()
 
-    def account(self):
-        return self.db.execute("SELECT * FROM accounts WHERE telegram=?", (self.chat,)).fetchone()
+    def account(self, telegram=None):
+        telegram = self.chat if telegram is None else telegram
+        return self.db.execute("""SELECT a.student,s.listed FROM accounts a JOIN students s ON s.id=a.student
+            WHERE a.telegram=?""", (telegram,)).fetchone()
 
     def home(self, intro="", role_menu=False):
         viewer = self.viewer()
@@ -305,7 +334,8 @@ class Screen:
                       "mute" if notify else "unmute")])
         text = ("📘 <b>Оценки группы</b>\n\n" + (intro + "\n\n" if intro else "") +
                 "Выбери одногруппника и поставь балл от 1 до 5. В таблице видны "
-                "средний балл и число голосов. Свой голос можно изменить.")
+                "общий средний балл и средний за сегодня. Каждого можно оценить один раз в день. "
+                "Следующая оценка доступна с 00:00 по Москве.")
         if self.owner:
             text += f"\n\nСсылка для группы: https://t.me/{self.journal.username}"
         status = "включены" if notify else "выключены"
@@ -336,16 +366,18 @@ class Screen:
             self.link_profile(sid, self.chat)
             return "Ты владелец бота. Тебе доступно управление участниками и VIP-статусами."
         if self.owner and current:
-            self.db.execute("UPDATE students SET vip=1 WHERE id=? AND vip=0", (current["student"],))
+            self.db.execute("UPDATE students SET vip=1,listed=1 WHERE id=? AND (vip=0 OR listed=0)", (current["student"],))
             return "Твой постоянный VIP активен. Кнопки управления доступны ниже."
         if self.owner:
             return "Твой VIP активен. Для собственной строки в таблице укажи username в Telegram и нажми /start."
+        if current and not current["listed"]:
+            current = None
         if key.startswith("join_") and not current:
             return "Попроси VIP открыть твою прежнюю карточку и выбрать твой аккаунт в Telegram."
         if not current:
             return "Ты можешь голосовать. Чтобы другие могли оценить тебя, попроси VIP добавить твой @username."
         if self.is_vip:
-            return "Твой статус 💎 VIP активен. Кнопки управления уже доступны."
+            return "Твой статус VIP активен. Кнопки управления уже доступны."
         return ""
 
     def create_row(self, telegram, user):
@@ -361,11 +393,11 @@ class Screen:
         if source is not None:
             self.db.execute("""UPDATE students SET vip=1 WHERE id=? AND EXISTS
                 (SELECT 1 FROM students WHERE id=? AND vip=1)""", (sid, source))
-            self.db.execute("""INSERT INTO votes(student,voter,grade,changed)
-                SELECT ?,voter,grade,changed FROM votes WHERE student=?
-                ON CONFLICT(student,voter) DO UPDATE SET
+            self.db.execute("""INSERT INTO votes(student,voter,day,grade,changed)
+                SELECT ?,voter,day,grade,changed FROM votes WHERE student=?
+                ON CONFLICT(student,voter,day) DO UPDATE SET
                     grade=excluded.grade, changed=excluded.changed
-                WHERE excluded.changed > votes.changed""", (sid, source))
+                WHERE excluded.changed < votes.changed""", (sid, source))
             self.db.execute("DELETE FROM students WHERE id=?", (source,))
         self.db.execute("DELETE FROM votes WHERE student=? AND voter=?", (sid, telegram))
         self.db.execute("INSERT INTO accounts(student,telegram,invited) VALUES (?,?,1)", (sid, telegram))
@@ -476,7 +508,7 @@ class Screen:
 
     def finish_add(self, req, telegram, user):
         sid = req["target"]
-        current = self.db.execute("SELECT student FROM accounts WHERE telegram=?", (telegram,)).fetchone()
+        current = self.account(telegram)
         self.close_picker()
         if sid is not None:
             target = self.db.execute("SELECT * FROM standings WHERE id=?", (sid,)).fetchone()
@@ -493,18 +525,22 @@ class Screen:
                 self.card(target, "У аккаунта уже есть карточка. Проверь обе записи перед объединением.")
                 return
         elif current:
-            self.card(self.db.execute("SELECT * FROM standings WHERE id=?", (current["student"],)).fetchone(),
-                      "Этот аккаунт уже в таблице.")
-            return
+            sid = current["student"]
+            if current["listed"]:
+                self.card(self.db.execute("SELECT * FROM standings WHERE id=?", (sid,)).fetchone(),
+                          "Этот аккаунт уже в таблице.")
+                return
+            self.db.execute("UPDATE students SET listed=1,revision=revision+1 WHERE id=?", (sid,))
         else:
             sid = self.create_row(telegram, user)
-        self.link_profile(sid, telegram)
+        if not current:
+            self.link_profile(sid, telegram)
         if req["grant_vip"]:
             self.db.execute("UPDATE students SET vip=1,revision=revision+1 WHERE id=?", (sid,))
         student = self.db.execute("SELECT * FROM standings WHERE id=?", (sid,)).fetchone()
         if student["vip"]:
-            self.notify_role(telegram, "Тебе выдан 💎 VIP. Кнопки управления доступны ниже.")
-        self.card(student, "Аккаунт подтверждён. VIP выдан." if student["vip"] else "Аккаунт подтверждён и добавлен в таблицу.")
+            self.notify_role(telegram, "Тебе выдан VIP. Кнопки управления доступны ниже.")
+        self.card(student, "Аккаунт подтверждён. VIP выдан." if req["grant_vip"] else "Аккаунт подтверждён и добавлен в таблицу.")
 
     def action(self, data):
         if not self.viewer():
@@ -539,18 +575,18 @@ class Screen:
         total = self.db.execute("SELECT COUNT(*) FROM standings" + where, args).fetchone()[0]
         pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
         page = min(page, pages-1)
-        students = self.db.execute("SELECT * FROM standings" + where + " ORDER BY lower(COALESCE(username,name)),id LIMIT ? OFFSET ?",
+        students = self.db.execute("SELECT * FROM standings" + where + " ORDER BY mean DESC, lower(COALESCE(username,name)),id LIMIT ? OFFSET ?",
                                    (*args, PAGE_SIZE, page * PAGE_SIZE)).fetchall()
         rows = []
         if mode != "table":
-            text = "<b>Кому поставить оценку?</b>" if mode == "pick" else "<b>💎 Участники и VIP</b>\nВыбери участника."
+            text = "<b>Кому поставить оценку?</b>" if mode == "pick" else "<b>Управление участниками</b>\nВыбери участника."
             rows.extend([[(display_name(s), f"card:{s['id']}")] for s in students])
             if not students:
                 text += "\n\nДругих участников пока нет. VIP могут добавить одногруппников в таблицу."
         else:
-            text = "📋 <b>Таблица оценок</b>\nСреднее по пятибалльной шкале · число голосов"
-            for s in students:
-                text += f"\n\n<b>{escape(display_name(s))}</b>   {summary(s)}"
+            text = "📋 <b>Рейтинг группы</b>\nПо среднему за всё время · оценки от 1 до 5 · день по Москве"
+            for rank, s in enumerate(students, start=page * PAGE_SIZE + 1):
+                text += f"\n\n<b>{rank}. {escape(display_name(s))}</b>\n{summary(s)}"
             if not students:
                 text += "\n\nВ журнале пока пусто."
         if pages > 1:
@@ -568,9 +604,9 @@ class Screen:
             rows.append(ADD)
         self.show(text, rows + [BACK])
 
-    def own_vote(self, sid):
-        return self.db.execute("SELECT grade,changed FROM votes WHERE student=? AND voter=?",
-                               (sid, self.chat)).fetchone()
+    def own_vote(self, sid, day):
+        return self.db.execute("SELECT grade FROM votes WHERE student=? AND voter=? AND day=?",
+                               (sid, self.chat, day)).fetchone()
 
     def received(self, page):
         if not self.is_vip:
@@ -592,10 +628,14 @@ class Screen:
         text = f"<b>{escape(display_name(student))}</b>\n{summary(student)}"
         rows = []
         if student["telegram"] != self.chat:
-            mine = self.own_vote(sid)
-            version = mine["changed"] if mine else 0
-            text += f"\nТвоя оценка: {mine['grade']} из 5." if mine else "\nТвоей оценки пока нет."
-            rows.append([(str(i), f"vote:{sid}:{version}:{i}") for i in range(1, 6)])
+            today = student["today"]
+            mine = self.own_vote(sid, today)
+            if mine:
+                text += f"\nТвоя оценка сегодня: {mine['grade']} из 5. Следующая — с 00:00 МСК."
+                rows.append([("↻ Обновить карточку", f"card:{sid}")])
+            else:
+                text += "\nТвоя оценка за сегодня:"
+                rows.append([(str(i), f"vote:{sid}:{today}:{i}") for i in range(1, 6)])
         if self.is_vip and student["telegram"] is None:
             source = self.merge_source(sid)
             if source:
@@ -609,9 +649,9 @@ class Screen:
                 rows.append([("Привязать @username", f"bind:{sid}")])
         if self.is_vip:
             if not self.is_owner_card(student):
-                if not student["vip"] or self.owner:
-                    rows.append([("Снять VIP" if student["vip"] else "Выдать VIP",
-                                  f"vip:{sid}:{1-student['vip']}:{student['revision']}")])
+                revoke = self.owner and student["vip"]
+                rows.append([("Снять VIP" if revoke else "Выдать VIP",
+                              f"vip:{sid}:{0 if revoke else 1}:{student['revision']}")])
                 rows.append([("Убрать из таблицы", f"remove:{sid}:{student['revision']}")])
             rows.append(MANAGE)
         rows.extend([[("Выбрать другого", "pick:0")], [(TABLE, "table:0")], BACK])
@@ -644,7 +684,7 @@ class Screen:
                                       (value, sid, value)).rowcount
             note = "Статус VIP выдан." if value else "Статус VIP снят."
             if changed and student["telegram"] is not None:
-                self.notify_role(student["telegram"], "Тебе выдан 💎 VIP. Кнопки управления доступны ниже."
+                self.notify_role(student["telegram"], "Тебе выдан VIP. Кнопки управления доступны ниже."
                                  if value else "Твой VIP снят. Ниже твоё текущее меню.")
             updated = self.db.execute("SELECT * FROM standings WHERE id=?", (sid,)).fetchone()
             self.card(updated, note)
@@ -662,61 +702,62 @@ class Screen:
         elif cmd in ("bind", "invite") and student["telegram"] is None:
             self.begin_add(target=sid)
         elif cmd in ("remove", "confirm") and parts[2:] == [str(student["revision"])]:
+            if student["vip"] and not self.owner:
+                self.card(student, "Убрать эту карточку может только администратор.")
+                return
             if cmd == "remove":
-                question = f"Убрать <b>{escape(display_name(student))}</b> и все полученные оценки из таблицы?"
+                question = f"Убрать <b>{escape(display_name(student))}</b> из таблицы? История оценок сохранится."
                 if student["vip"]:
                     question += " Участник также потеряет VIP-права."
                 self.show(question,
                           [[("Убрать", f"confirm:{sid}:{student['revision']}"), ("Оставить", f"card:{sid}")]])
             else:
-                self.db.execute("DELETE FROM students WHERE id=?", (sid,))
+                self.db.execute("UPDATE students SET listed=0,vip=0,revision=revision+1 WHERE id=?", (sid,))
+                self.db.execute("DELETE FROM invitations WHERE student=? OR merge_from=?", (sid, sid))
+                self.db.execute("DELETE FROM pickers WHERE target=?", (sid,))
+                self.db.execute("DELETE FROM outbox WHERE grade_student=?", (sid,))
                 if student["vip"] and student["telegram"] is not None:
-                    self.notify_role(student["telegram"], "Твоя карточка удалена. Ниже твоё текущее меню.")
+                    self.notify_role(student["telegram"], "Твою карточку убрали из таблицы. Ниже твоё текущее меню.")
                 self.show("Запись убрана из таблицы.", [[(TABLE, "table:0")], BACK])
         else:
             # Old single-owner keyboards open the current card on upgrade.
             self.card(student)
 
-    def vote(self, student, version, grade):
+    def vote(self, student, day, grade):
         sid = student["id"]
         if student["telegram"] == self.chat:
             self.show("Это твой профиль. Выбери другого участника.", [[("К списку", "pick:0")], BACK])
             return
-        prior = self.own_vote(sid)
-        if version != str(prior["changed"] if prior else 0):
-            self.card(student, "Карточка обновлена. Выбери балл ещё раз.")
+        if day != student["today"]:
+            self.card(student, "Карточка обновлена на сегодня.")
             return
-        if prior and grade == prior["grade"]:
-            self.card(student, "Этот голос уже учтён.")
+        inserted = self.db.execute("""INSERT INTO votes(student,voter,day,grade,changed)
+            VALUES (?,?,?,?,?) ON CONFLICT(student,voter,day) DO NOTHING""",
+            (sid, self.chat, day, grade, time.time_ns())).rowcount
+        if not inserted:
+            self.card(student, "Сегодня ты уже оценил этого участника.")
             return
-        self.db.execute("""INSERT INTO votes(student,voter,grade,changed) VALUES (?,?,?,?)
-            ON CONFLICT(student,voter) DO UPDATE SET grade=excluded.grade,changed=excluded.changed""",
-            (sid, self.chat, grade, max(time.time_ns(), prior["changed"] + 1 if prior else 1)))
         self.db.execute("UPDATE students SET revision=revision+1 WHERE id=?", (sid,))
         updated = self.db.execute("SELECT * FROM standings WHERE id=?", (sid,)).fetchone()
-        title = "Оценка изменена" if prior else "Новая оценка"
-        text = (f"📘 <b>{title}</b>\n\n{escape(display_name(updated))}  ·  {grade} из 5\n"
+        text = (f"📘 <b>Новая оценка</b>\n\n{escape(display_name(updated))}  ·  {grade} из 5\n"
                 f"Теперь в таблице: {summary(updated)}")
-        self.card(updated, "✓ Твоя оценка изменена." if prior else "✓ Твоя оценка учтена.")
+        self.card(updated, "✓ Твоя оценка учтена.")
         self.db.execute("""INSERT INTO outbox(chat,method,body,announcement,grade_student)
             SELECT chat,'sendMessage',?,1,? FROM grade_subscribers
             WHERE student=? OR vip=1""", (json.dumps({"text": text}, ensure_ascii=False), sid, sid))
 
 
 def display_name(student):
-    label = "@" + student["username"] if student["username"] else student["name"]
-    return f"{label} · {VIP}" if student["vip"] else label
+    return "@" + student["username"] if student["username"] else student["name"]
 
 
 def summary(student):
-    n = student["n"]
-    if not n:
-        return "Пока нет оценок"
-    mean = f"{student['mean']:.2f}".rstrip("0").rstrip(".").replace(".", ",")
-    if n % 10 == 1 and n % 100 != 11:
-        noun = "голос"
-    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
-        noun = "голоса"
-    else:
-        noun = "голосов"
-    return f"{mean} из 5 · {n} {noun}"
+    def average(mean, count):
+        if mean is None:
+            return "—"
+        score = f"{mean:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+        return f"{score} из 5 · оценок: {count}"
+
+    overall = average(student["mean"], student["n"])
+    today = average(student["today_mean"], student["today_n"])
+    return f"За всё время: {overall}\nСегодня: {today}"

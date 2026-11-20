@@ -237,7 +237,7 @@ def main(resolve_journal=journal_path):
         with_retry(lambda: api.call("setMyCommands", commands=[
             {"command": "start", "description": "Открыть журнал"},
             {"command": "rate", "description": "Оценить одногруппника"},
-            {"command": "table", "description": "Средние баллы и число голосов"},
+            {"command": "table", "description": "Рейтинг за всё время и средние баллы за сегодня"},
             {"command": "menu", "description": "Главное меню и уведомления"}
         ]))
         if key:

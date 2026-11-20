@@ -27,6 +27,7 @@ jobs:
           persist-credentials: false
       - name: Собрать и проверить бота
         run: |
+          python3 scripts/check_ratings.py
           python3 -m py_compile scripts/auto_update.py
           python3 scripts/package_bot.py "$RUNNER_TEMP/bot.pyz"
           python3 scripts/check_bundle.py "$RUNNER_TEMP/bot.pyz"
