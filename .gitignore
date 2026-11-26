@@ -12,3 +12,7 @@ transfer/
 *.zip
 *.pyz
 .DS_Store
+cloudflare/dist/
+cloudflare/.wrangler/
+cloudflare/.dev.vars*
+cloudflare/node_modules/

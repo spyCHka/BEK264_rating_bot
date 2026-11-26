@@ -1,0 +1,39 @@
+name: Проверить бота на Cloudflare
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bot.py'
+      - 'delivery.py'
+      - 'cloudflare/**'
+      - '.github/workflows/cloudflare-check.yml'
+  pull_request:
+    paths:
+      - 'bot.py'
+      - 'delivery.py'
+      - 'cloudflare/**'
+      - '.github/workflows/cloudflare-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Проверить правила оценок
+        run: python3 scripts/check_ratings.py
+      - name: Проверить перенос и обработку сообщений в локальном Worker
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          npm install --prefix "$RUNNER_TEMP/cf" --no-fund --no-audit wrangler@4.168.0
+          WRANGLER_BIN="$RUNNER_TEMP/cf/node_modules/.bin/wrangler" python3 cloudflare/check_local.py

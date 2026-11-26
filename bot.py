@@ -2,7 +2,6 @@
 import json
 import re
 import secrets
-import sqlite3
 import time
 import unicodedata
 from html import escape
@@ -16,6 +15,8 @@ MY_GRADES = [("Кто меня оценил", "received:0")]
 
 
 def connect(path):
+    import sqlite3
+
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
     db.executescript("""
@@ -246,21 +247,24 @@ class Journal:
             last, active = self.cursor()
             if active and update["update_id"] <= last:
                 return
-            callback = update.get("callback_query")
-            msg = callback.get("message", {}) if callback else update.get("message", {})
-            chat = msg.get("chat", {})
-            sender = (callback or msg).get("from", {})
-            if chat.get("type") == "private" and chat.get("id") == sender.get("id") and not sender.get("is_bot"):
-                screen = Screen(self, sender, msg.get("message_id") if callback else None)
-                screen.remember(sender["id"], sender.get("username"), telegram_name(sender))
-                if callback:
-                    screen.action(callback.get("data", ""))
-                elif "users_shared" in msg and not msg.get("forward_origin") and not msg.get("via_bot"):
-                    screen.shared(msg["users_shared"])
-                else:
-                    screen.message(msg.get("text", ""))
+            self.dispatch(update)
             set_value(db, "offset", update["update_id"])
             set_value(db, "last_seen", int(time.time()))
+
+    def dispatch(self, update):
+        callback = update.get("callback_query")
+        msg = callback.get("message", {}) if callback else update.get("message", {})
+        chat = msg.get("chat", {})
+        sender = (callback or msg).get("from", {})
+        if chat.get("type") == "private" and chat.get("id") == sender.get("id") and not sender.get("is_bot"):
+            screen = Screen(self, sender, msg.get("message_id") if callback else None)
+            screen.remember(sender["id"], sender.get("username"), telegram_name(sender))
+            if callback:
+                screen.action(callback.get("data", ""))
+            elif "users_shared" in msg and not msg.get("forward_origin") and not msg.get("via_bot"):
+                screen.shared(msg["users_shared"])
+            else:
+                screen.message(msg.get("text", ""))
 
     def cursor(self):
         active = time.time() - int(setting(self.db, "last_seen", "0")) < 6 * 86400

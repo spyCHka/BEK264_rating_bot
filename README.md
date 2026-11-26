@@ -10,6 +10,10 @@ Telegram-бот с журналом взаимных оценок группы. 
 
 Профили и рейтинг отображают участников без значков роли. У VIP остаются личная история с авторами оценок, уведомления и управление участниками. Снимать VIP может только владелец бота.
 
+## Бесплатное размещение на Cloudflare
+
+[Подключение GitHub, перенос журнала с Altare и включение бота на Workers Free](cloudflare/README.md).
+
 ## Подключение работающего бота на Altare
 
 1. Скачай [auto_update.py](https://github.com/spyCHka/BEK264_rating_bot/releases/latest/download/auto_update.py). В Altare открой сервер BEK264_rating_bot → **Файлы** и загрузи его рядом с существующим `main.py`.
